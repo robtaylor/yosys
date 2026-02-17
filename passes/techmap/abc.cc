@@ -115,6 +115,7 @@ struct gate_t
 	bool bit_is_1;
 	RTLIL::State init;
 	std::string bit_str;
+	std::string src_attr;
 };
 
 struct AbcConfig
@@ -350,6 +351,8 @@ int AbcModuleState::map_signal(const AbcSigMap &assign_map, RTLIL::SigBit bit, g
 		gate.bit_is_1 = bit == State::S1;
 		gate.init = initvals(bit);
 		gate.bit_str = std::string(log_signal(bit));
+		if (bit.wire != nullptr && bit.wire->attributes.count(ID::src))
+			gate.src_attr = bit.wire->attributes[ID::src].decode_string();
 		signal_map[bit] = gate.id;
 		run_abc.signal_list.push_back(std::move(gate));
 		signal_bits.push_back(bit);
@@ -1349,6 +1352,19 @@ void RunAbcState::run(ConcurrentStack<AbcProcess> &)
 	fprintf(f, ".end\n");
 	fclose(f);
 
+	// Write src_map.txt: maps signal names to \src attribute values
+	{
+		std::string src_map_path = stringf("%s/src_map.txt", per_run_tempdir_name);
+		FILE *sf = fopen(src_map_path.c_str(), "wt");
+		if (sf != nullptr) {
+			for (auto &si : signal_list) {
+				if (!si.src_attr.empty())
+					fprintf(sf, "ys__n%d\t%s\n", si.id, si.src_attr.c_str());
+			}
+			fclose(sf);
+		}
+	}
+
 	logs.log("Extracted %d gates and %d wires to a netlist network with %d inputs and %d outputs.\n",
 			count_gates, GetSize(signal_list), count_input, count_output);
 	if (count_output == 0) {
@@ -1521,6 +1537,52 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 	parse_blif(mapped_design, ifs, builtin_lib ? ID(DFF) : ID(_dff_), false, run_abc.config.sop_mode);
 
 	ifs.close();
+
+	// Parse node retention section from output BLIF
+	dict<std::string, pool<std::string>> retention_map; // net_name -> {origin_names}
+	{
+		std::ifstream blif_in(buffer);
+		std::string line;
+		bool in_retention = false;
+		while (std::getline(blif_in, line)) {
+			if (line == ".node_retention_begin") { in_retention = true; continue; }
+			if (line == ".node_retention_end") break;
+			if (!in_retention) continue;
+			// Format: "net_name SRC origin1 origin2 ..."
+			std::istringstream iss(line);
+			std::string net_name, src_tok, origin;
+			iss >> net_name >> src_tok;
+			if (src_tok != "SRC") continue;
+			while (iss >> origin)
+				retention_map[net_name].insert(origin);
+		}
+	}
+
+	// Read src_map.txt
+	dict<std::string, std::string> src_map; // ys__nN -> \src string
+	{
+		std::string src_map_path = stringf("%s/src_map.txt", run_abc.per_run_tempdir_name);
+		std::ifstream src_in(src_map_path);
+		std::string line;
+		while (std::getline(src_in, line)) {
+			auto tab = line.find('\t');
+			if (tab != std::string::npos)
+				src_map[line.substr(0, tab)] = line.substr(tab + 1);
+		}
+	}
+
+	// Helper: resolve \src values for a post-opt net via retention
+	auto resolve_src = [&](const std::string &net_name) -> pool<std::string> {
+		pool<std::string> result;
+		auto it = retention_map.find(net_name);
+		if (it == retention_map.end()) return result;
+		for (auto &origin : it->second) {
+			auto sit = src_map.find(origin);
+			if (sit != src_map.end())
+				result.insert(sit->second);
+		}
+		return result;
+	};
 
 	log_header(design, "Re-integrating ABC results.\n");
 	RTLIL::Module *mapped_mod = mapped_design->module(ID(netlist));
@@ -1754,6 +1816,28 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 			cell->setPort(conn.first, newsig);
 		}
 		design->select(module, cell);
+	}
+
+	// Apply \src attributes from retention map to newly created cells
+	if (!retention_map.empty()) {
+		for (auto c : mapped_mod->cells()) {
+			// Find the output port name in the mapped design
+			std::string abc_net_name;
+			if (c->hasPort(ID::Y))
+				abc_net_name = c->getPort(ID::Y).as_wire()->name.substr(1); // strip leading backslash
+			else if (c->hasPort(ID::Q))
+				abc_net_name = c->getPort(ID::Q).as_wire()->name.substr(1);
+			if (abc_net_name.empty()) continue;
+
+			pool<std::string> src_pool = resolve_src(abc_net_name);
+			if (src_pool.empty()) continue;
+
+			// Find the corresponding cell in our module
+			RTLIL::IdString remapped = remap_name(c->name);
+			RTLIL::Cell *cell = module->cell(remapped);
+			if (cell != nullptr)
+				cell->add_strpool_attribute(ID::src, src_pool);
+		}
 	}
 
 	for (auto conn : mapped_mod->connections()) {
