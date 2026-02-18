@@ -1532,31 +1532,37 @@ void AbcModuleState::extract(AbcSigMap &assign_map, RTLIL::Design *design, RTLIL
 	if (ifs.fail())
 		log_error("Can't open ABC output file `%s'.\n", buffer);
 
-	bool builtin_lib = run_abc.config.liberty_files.empty() && run_abc.config.genlib_files.empty();
-	RTLIL::Design *mapped_design = new RTLIL::Design;
-	parse_blif(mapped_design, ifs, builtin_lib ? ID(DFF) : ID(_dff_), false, run_abc.config.sop_mode);
-
-	ifs.close();
-
-	// Parse node retention section from output BLIF
+	// Read the entire BLIF, separating main content from retention section.
+	// The retention section (.node_retention_begin/.node_retention_end) appears
+	// after .end and would cause parse_blif() to fail with a syntax error.
+	std::string blif_content;
 	dict<std::string, pool<std::string>> retention_map; // net_name -> {origin_names}
 	{
-		std::ifstream blif_in(buffer);
 		std::string line;
 		bool in_retention = false;
-		while (std::getline(blif_in, line)) {
+		while (std::getline(ifs, line)) {
 			if (line == ".node_retention_begin") { in_retention = true; continue; }
-			if (line == ".node_retention_end") break;
-			if (!in_retention) continue;
-			// Format: "net_name SRC origin1 origin2 ..."
-			std::istringstream iss(line);
-			std::string net_name, src_tok, origin;
-			iss >> net_name >> src_tok;
-			if (src_tok != "SRC") continue;
-			while (iss >> origin)
-				retention_map[net_name].insert(origin);
+			if (line == ".node_retention_end") { in_retention = false; continue; }
+			if (in_retention) {
+				// Format: "net_name SRC origin1 origin2 ..."
+				std::istringstream iss(line);
+				std::string net_name, src_tok, origin;
+				iss >> net_name >> src_tok;
+				if (src_tok == "SRC") {
+					while (iss >> origin)
+						retention_map[net_name].insert(origin);
+				}
+			} else {
+				blif_content += line + "\n";
+			}
 		}
 	}
+	ifs.close();
+
+	bool builtin_lib = run_abc.config.liberty_files.empty() && run_abc.config.genlib_files.empty();
+	RTLIL::Design *mapped_design = new RTLIL::Design;
+	std::istringstream blif_stream(blif_content);
+	parse_blif(mapped_design, blif_stream, builtin_lib ? ID(DFF) : ID(_dff_), false, run_abc.config.sop_mode);
 
 	// Read src_map.txt
 	dict<std::string, std::string> src_map; // ys__nN -> \src string
