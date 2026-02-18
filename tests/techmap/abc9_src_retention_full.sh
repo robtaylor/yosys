@@ -1,16 +1,17 @@
 #!/bin/bash
 # Full test for \src retention through ABC9 synthesis.
-# Requires: yosys built with ABCEXTERNAL pointing to an ABC with node_retention support.
-#
-# Usage: ABCEXTERNAL=/path/to/abc bash tests/techmap/abc9_src_retention_full.sh
+# When ABC lacks node_retention support, this test passes with an INFO message.
+# To fully validate, use an ABC with node_retention support (ABCEXTERNAL).
 
 set -eu
 
-YOSYS=${YOSYS:-./yosys}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YOSYS=${YOSYS:-${SCRIPT_DIR}/../../yosys}
 
-# Create test verilog
-cat > /tmp/test_abc9_src_ret.v <<'EOF'
+TMPDIR=$(mktemp -d)
+trap "rm -rf $TMPDIR" EXIT
+
+cat > "$TMPDIR/test.v" <<'EOF'
 (* src = "counter.v:1.1-10.10" *)
 module counter(input wire clk, input wire rst, input wire en, output reg [3:0] count);
     (* src = "counter.v:3.5-8.8" *)
@@ -23,20 +24,18 @@ module counter(input wire clk, input wire rst, input wire en, output reg [3:0] c
 endmodule
 EOF
 
-echo "=== Testing \src retention through ABC9 ==="
+echo "=== Testing \\src retention through ABC9 ==="
 
-# Run synthesis with abc9 -lut
 $YOSYS -p "
-read_verilog /tmp/test_abc9_src_ret.v
+read_verilog $TMPDIR/test.v
 synth -top counter -flatten
 abc9 -lut 4
-write_json /tmp/test_abc9_src_ret_output.json
+write_json $TMPDIR/output.json
 " 2>&1
 
-# Check if any cells have src attributes
 SRC_CELLS=$(python3 -c "
 import json
-with open('/tmp/test_abc9_src_ret_output.json') as f:
+with open('$TMPDIR/output.json') as f:
     data = json.load(f)
 count = 0
 for mod_name, mod in data.get('modules', {}).items():
@@ -46,13 +45,10 @@ for mod_name, mod in data.get('modules', {}).items():
 print(count)
 ")
 
-echo "Cells with \src attributes: $SRC_CELLS"
+echo "Cells with \\src attributes: $SRC_CELLS"
 
 if [ "$SRC_CELLS" -gt 0 ]; then
-    echo "PASS: \src attributes preserved through ABC9 synthesis"
+    echo "PASS: \\src attributes preserved through ABC9 synthesis"
 else
-    echo "INFO: No \src attributes on cells (expected if ABC lacks node_retention)"
+    echo "INFO: No \\src attributes on cells (expected if ABC lacks node_retention)"
 fi
-
-# Cleanup
-rm -f /tmp/test_abc9_src_ret.v /tmp/test_abc9_src_ret_output.json
