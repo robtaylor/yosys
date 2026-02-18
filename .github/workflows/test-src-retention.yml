@@ -1,0 +1,148 @@
+name: Test src retention through ABC
+
+on:
+  push:
+    branches:
+      - src_retention_abc
+      - src_retention_abc9
+  pull_request:
+    branches:
+      - master
+      - src_retention_abc
+  workflow_dispatch:
+
+jobs:
+  test-src-retention:
+    name: Test src retention (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: clang
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+      fail-fast: false
+    steps:
+      - name: Checkout Yosys
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Setup environment
+        uses: ./.github/actions/setup-build-env
+        with:
+          runs-on: ${{ matrix.os }}
+          get-build-deps: true
+          get-test-deps: true
+
+      - name: Build retention-enabled ABC
+        shell: bash
+        run: |
+          git clone --depth 1 --branch node_retention https://github.com/robtaylor/abc.git abc-retention
+          cd abc-retention
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . -j"$procs"
+          echo "ABC_PATH=$(pwd)/abc" >> "$GITHUB_ENV"
+
+      - name: Build Yosys with retention-enabled ABC
+        shell: bash
+        run: |
+          mkdir build
+          cd build
+          make -f ../Makefile config-"$CC"
+          make -f ../Makefile -j"$procs" ABCEXTERNAL="$ABC_PATH"
+
+      - name: Run basic techmap tests
+        shell: bash
+        run: |
+          cd build
+          ./yosys -p "
+            read_verilog -sv <<EOT
+            (* src = \"test.v:1.1-5.10\" *)
+            module test(input wire a, input wire b, output wire y);
+                (* src = \"test.v:3.5-3.20\" *)
+                wire w;
+                assign w = a & b;
+                assign y = ~w;
+            endmodule
+            EOT
+            synth -top test -flatten
+            abc -lut 4
+            select -assert-any t:\$lut
+          " 2>&1 | tee abc_basic.log
+
+      - name: Run ABC src retention test
+        shell: bash
+        run: |
+          cd build
+          ./yosys -p "
+            read_verilog -sv <<EOT
+            (* src = \"test.v:1.1-5.10\" *)
+            module test(input wire a, input wire b, output wire y);
+                (* src = \"test.v:3.5-3.20\" *)
+                wire w;
+                assign w = a & b;
+                assign y = ~w;
+            endmodule
+            EOT
+            synth -top test -flatten
+            abc -lut 4
+            write_json abc_src_ret_output.json
+          " 2>&1 | tee abc_src_retention.log
+
+          python3 ../tests/techmap/scripts/validate_src_retention.py abc_src_ret_output.json
+
+      - name: Run ABC9 src retention test
+        shell: bash
+        run: |
+          cd build
+          ./yosys -p "
+            read_verilog -sv <<EOT
+            (* src = \"counter.v:1.1-10.10\" *)
+            module counter(input wire clk, input wire rst, input wire en, output reg [3:0] count);
+                (* src = \"counter.v:3.5-8.8\" *)
+                always @(posedge clk) begin
+                    if (rst)
+                        count <= 4'b0;
+                    else if (en)
+                        count <= count + 1;
+                end
+            endmodule
+            EOT
+            synth -top counter -flatten
+            abc9 -lut 4
+            write_json abc9_src_ret_output.json
+          " 2>&1 | tee abc9_src_retention.log
+
+          python3 ../tests/techmap/scripts/validate_src_retention.py abc9_src_ret_output.json
+
+      - name: Run multi-module retention test
+        shell: bash
+        run: |
+          cd build
+          ./yosys -p "
+            read_verilog -sv <<EOT
+            (* src = \"adder.v:1.1-6.10\" *)
+            module adder(input wire [7:0] a, input wire [7:0] b, output wire [8:0] sum);
+                (* src = \"adder.v:3.5-3.30\" *)
+                assign sum = a + b;
+            endmodule
+            EOT
+            synth -top adder -flatten
+            abc -lut 4
+            write_json multi_abc_output.json
+          " 2>&1 | tee multi_abc.log
+
+          python3 ../tests/techmap/scripts/validate_src_retention.py multi_abc_output.json
+
+      - name: Report errors
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== ABC basic log ==="
+          cat build/abc_basic.log 2>/dev/null || true
+          echo "=== ABC src retention log ==="
+          cat build/abc_src_retention.log 2>/dev/null || true
+          echo "=== ABC9 src retention log ==="
+          cat build/abc9_src_retention.log 2>/dev/null || true
