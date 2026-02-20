@@ -84,7 +84,6 @@ jobs:
           cat > build/test_fixtures/adder.v <<'VEOF'
           (* src = "adder.v:1.1-6.10" *)
           module adder(input wire [7:0] a, input wire [7:0] b, output wire [8:0] sum);
-              (* src = "adder.v:3.5-3.30" *)
               assign sum = a + b;
           endmodule
           VEOF
