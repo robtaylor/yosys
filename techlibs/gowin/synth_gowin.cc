@@ -29,6 +29,21 @@ struct SynthGowinPass : public ScriptPass
 {
 	SynthGowinPass() : ScriptPass("synth_gowin", "synthesis for Gowin FPGAs") { }
 
+	struct DSPRule {
+		int a_maxwidth;
+		int b_maxwidth;
+		int a_minwidth;
+		int b_minwidth;
+		std::string prim;
+	};
+
+	const std::vector<DSPRule> dsp_rules = {
+		{36, 36, 22, 22, "$__MUL36X36"},
+		{18, 18, 10, 4, "$__MUL18X18"},
+		{18, 18, 4, 10, "$__MUL18X18"},
+		{9, 9, 4, 4, "$__MUL9X9"},
+	};
+
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -57,6 +72,9 @@ struct SynthGowinPass : public ScriptPass
 		log("    -nodffe\n");
 		log("        do not use flipflops with CE in output netlist\n");
 		log("\n");
+		log("    -strict-gw5a-dffs\n");
+		log("        use only DFFSE/DFFRE/DFFPE/DFFCE flipflops for the GW5A family\n");
+		log("\n");
 		log("    -nobram\n");
 		log("        do not use BRAM cells in output netlist\n");
 		log("\n");
@@ -78,25 +96,36 @@ struct SynthGowinPass : public ScriptPass
 		log("    -noalu\n");
 		log("        do not use ALU cells\n");
 		log("\n");
-		log("    -abc9\n");
-		log("        use new ABC9 flow (EXPERIMENTAL)\n");
+		log("    -noabc9\n");
+		log("        disable use of new ABC9 flow\n");
 		log("\n");
 		log("    -no-rw-check\n");
 		log("        marks all recognized read ports as \"return don't-care value on\n");
 		log("        read/write collision\" (same result as setting the no_rw_check\n");
 		log("        attribute on all memories).\n");
 		log("\n");
+		log("    -family <family>\n");
+		log("        sets the gowin family to the specified value. The default is 'gw1n'.\n");
+		log("		  The following families are supported:\n");
+		log("        'gw1n', 'gw2a', 'gw5a'.\n");
+		log("\n");
+		log("    -setundef\n");
+		log("        set undriven wires and parameters to zero\n");
+		log("\n");
+		log("    -nodsp\n");
+		log("        do not infer DSP multipliers\n");
 		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
 		help_script();
 		log("\n");
 	}
 
-	string top_opt, vout_file, json_file;
-	bool retime, nobram, nolutram, flatten, nodffe, nowidelut, abc9, noiopads, noalu, no_rw_check;
+	string top_opt, vout_file, json_file, family;
+	bool retime, nobram, nolutram, flatten, nodffe, strict_gw5a_dffs, nowidelut, abc9, noiopads, noalu, no_rw_check, setundef, nodsp;
 
 	void clear_flags() override
 	{
+		family = "gw1n";
 		top_opt = "-auto-top";
 		vout_file = "";
 		json_file = "";
@@ -104,12 +133,15 @@ struct SynthGowinPass : public ScriptPass
 		flatten = true;
 		nobram = false;
 		nodffe = false;
+		strict_gw5a_dffs = false;
 		nolutram = false;
 		nowidelut = false;
-		abc9 = false;
+		abc9 = true;
 		noiopads = false;
 		noalu = false;
 		no_rw_check = false;
+		setundef = false;
+		nodsp = false;
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -130,7 +162,10 @@ struct SynthGowinPass : public ScriptPass
 			}
 			if (args[argidx] == "-json" && argidx+1 < args.size()) {
 				json_file = args[++argidx];
-				nobram = true;
+				continue;
+			}
+			if (args[argidx] == "-family" && argidx+1 < args.size()) {
+				family = args[++argidx];
 				continue;
 			}
 			if (args[argidx] == "-run" && argidx+1 < args.size()) {
@@ -157,6 +192,10 @@ struct SynthGowinPass : public ScriptPass
 				nodffe = true;
 				continue;
 			}
+			if (args[argidx] == "-strict-gw5a-dffs") {
+				strict_gw5a_dffs = true;
+				continue;
+			}
 			if (args[argidx] == "-noflatten") {
 				flatten = false;
 				continue;
@@ -170,7 +209,11 @@ struct SynthGowinPass : public ScriptPass
 				continue;
 			}
 			if (args[argidx] == "-abc9") {
-				abc9 = true;
+				// removed, ABC9 is on by default.
+				continue;
+			}
+			if (args[argidx] == "-noabc9") {
+				abc9 = false;
 				continue;
 			}
 			if (args[argidx] == "-noiopads") {
@@ -179,6 +222,14 @@ struct SynthGowinPass : public ScriptPass
 			}
 			if (args[argidx] == "-no-rw-check") {
 				no_rw_check = true;
+				continue;
+			}
+			if (args[argidx] == "-setundef") {
+				setundef = true;
+				continue;
+			}
+			if (args[argidx] == "-nodsp") {
+				nodsp = true;
 				continue;
 			}
 			break;
@@ -207,33 +258,59 @@ struct SynthGowinPass : public ScriptPass
 		if (check_label("begin"))
 		{
 			run("read_verilog -specify -lib +/gowin/cells_sim.v");
-			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt.c_str()));
-		}
-
-		if (flatten && check_label("flatten", "(unless -noflatten)"))
-		{
-			run("proc");
-			run("flatten");
-			run("tribuf -logic");
-			run("deminout");
+			run(stringf("read_verilog -specify -lib +/gowin/cells_xtra_%s.v", help_mode ? "<family>" : family));
+			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
 		}
 
 		if (check_label("coarse"))
 		{
-			run("synth -run coarse" + no_rw_check_opt);
+			run("proc");
+			if (flatten || help_mode)
+				run("flatten", "(unless -noflatten)");
+			run("tribuf -logic");
+			run("deminout");
+			run("opt_expr");
+			run("opt_clean");
+			run("check");
+			run("opt -nodffe -nosdff");
+			run("fsm");
+			run("opt");
+			run("wreduce");
+			run("peepopt");
+			run("opt_clean");
+			run("share");
+
+			if (help_mode) {
+				run("techmap -map +/mul2dsp.v [...]", "(unless -nodsp and if -family gw1n or gw2a)");
+				run("techmap -map +/gowin/dsp_map.v", "(unless -nodsp and if -family gw1n or gw2a)");
+			} else if (!nodsp && (family == "gw1n" || family == "gw2a")) {
+				for (const auto &rule : dsp_rules) {
+					run(stringf("techmap -map +/mul2dsp.v -D DSP_A_MAXWIDTH=%d -D DSP_B_MAXWIDTH=%d -D DSP_A_MINWIDTH=%d -D DSP_B_MINWIDTH=%d -D DSP_NAME=%s",
+						rule.a_maxwidth, rule.b_maxwidth, rule.a_minwidth, rule.b_minwidth, rule.prim));
+					run("chtype -set $mul t:$__soft_mul");
+				}
+				run("techmap -map +/gowin/dsp_map.v");
+			}
+
+			run("alumacc");
+			run("opt");
+			run("memory -nomap" + no_rw_check_opt);
+			run("opt_clean");
 		}
 
 		if (check_label("map_ram"))
 		{
 			std::string args = "";
-			if (nobram)
-				args += " -no-auto-block";
-			if (nolutram)
-				args += " -no-auto-distributed";
 			if (help_mode)
 				args += " [-no-auto-block] [-no-auto-distributed]";
-			run("memory_libmap -lib +/gowin/lutrams.txt -lib +/gowin/brams.txt" + args, "(-no-auto-block if -nobram, -no-auto-distributed if -nolutram)");
-			run("techmap -map +/gowin/lutrams_map.v -map +/gowin/brams_map.v");
+			else {
+				if (nobram)
+					args += " -no-auto-block";
+				if (nolutram)
+					args += " -no-auto-distributed";
+			}
+			run(stringf("memory_libmap -lib +/gowin/lutrams.txt -lib +/gowin/brams.txt -D %s", family) + args, "(-no-auto-block if -nobram, -no-auto-distributed if -nolutram)");
+			run(stringf("techmap -map +/gowin/lutrams_map.v -map +/gowin/brams_map%s.v", family == "gw5a" ? "_gw5a" : ""));
 		}
 
 		if (check_label("map_ffram"))
@@ -261,10 +338,18 @@ struct SynthGowinPass : public ScriptPass
 		if (check_label("map_ffs"))
 		{
 			run("opt_clean");
-			if (nodffe)
-				run("dfflegalize -cell $_DFF_?_ 0 -cell $_SDFF_?P?_ r -cell $_DFF_?P?_ r");
-			else
-				run("dfflegalize -cell $_DFF_?_ 0 -cell $_DFFE_?P_ 0 -cell $_SDFF_?P?_ r -cell $_SDFFE_?P?P_ r -cell $_DFF_?P?_ r -cell $_DFFE_?P?P_ r");
+			if (family == "gw5a") {
+				if (strict_gw5a_dffs) {
+					run("dfflegalize -cell $_SDFFE_PP?P_ r -cell $_DFFE_PP?P_ r");
+				} else {
+					run("dfflegalize -cell $_DFF_?_ 0 -cell $_SDFFE_PP?P_ r -cell $_DFFE_PP?P_ r");
+				}
+			} else {
+				if (nodffe)
+					run("dfflegalize -cell $_DFF_?_ 0 -cell $_SDFF_?P?_ r -cell $_DFF_?P?_ r");
+				else
+					run("dfflegalize -cell $_DFF_?_ 0 -cell $_DFFE_?P_ 0 -cell $_SDFF_?P?_ r -cell $_SDFFE_?P?P_ r -cell $_DFF_?P?_ r -cell $_DFFE_?P?P_ r");
+			}
 			run("techmap -map +/gowin/cells_map.v");
 			run("opt_expr -mux_undef");
 			run("simplemap");
@@ -272,6 +357,7 @@ struct SynthGowinPass : public ScriptPass
 
 		if (check_label("map_luts"))
 		{
+			run("sort");
 			if (nowidelut && abc9) {
 				run("read_verilog -icells -lib -specify +/abc9_model.v");
 				run("abc9 -maxlut 4 -W 500");
@@ -290,10 +376,11 @@ struct SynthGowinPass : public ScriptPass
 		{
 			run("techmap -map +/gowin/cells_map.v");
 			run("opt_lut_ins -tech gowin");
-			run("setundef -undriven -params -zero");
+			if (setundef || help_mode)
+				run("setundef -undriven -params -zero", "(only if -setundef)");
 			run("hilomap -singleton -hicell VCC V -locell GND G");
 			if (!vout_file.empty() || help_mode) // vendor output requires 1-bit wires
-				run("splitnets -ports", "(only if -vout used)");
+				run("splitnets -ports", "(only if -vout)");
 			run("clean");
 			run("autoname");
 		}
