@@ -18,6 +18,7 @@
  */
 
 #include "kernel/register.h"
+#include "frontends/aiger/aiger_origins.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -349,47 +350,30 @@ struct Xaiger2Frontend : public Frontend {
 				uint32_t n_entries = len / 4;
 				log_debug("y: len=%u n_entries=%u\n", len, n_entries);
 
-				std::vector<int32_t> equiv_lit_ids(n_entries);
-				f->read(reinterpret_cast<char*>(equiv_lit_ids.data()), len);
+				// Raw int32 payload is native-endian (written by ABC via fwrite on same host)
+				std::vector<int32_t> raw(n_entries);
+				f->read(reinterpret_cast<char*>(raw.data()), len);
+				auto origin_lits = parse_origin_lits(raw);
 
+				int applied = 0;
 				for (auto &[out_lit, instance] : lit_to_instance) {
 					pool<std::string> src_values;
-					// Collect \src from the output object's origin
 					uint32_t out_obj = out_lit >> 1;
-					if (out_obj < n_entries) {
-						int32_t equiv_lit = equiv_lit_ids[out_obj];
-						if (equiv_lit >= 0) {
-							auto src_it = obj_src.find(equiv_lit >> 1);
-							if (src_it != obj_src.end())
-								src_values.insert(src_it->second);
-						}
-					}
-					// Collect \src from each input object's origin
+					collect_origin_src(out_obj, origin_lits, obj_src, src_values);
 					auto leaf_it = instance_input_lits.find(out_lit);
 					if (leaf_it != instance_input_lits.end()) {
-						for (uint32_t in_lit : leaf_it->second) {
-							uint32_t in_obj = in_lit >> 1;
-							if (in_obj < n_entries) {
-								int32_t leaf_equiv = equiv_lit_ids[in_obj];
-								if (leaf_equiv >= 0) {
-									auto src_it = obj_src.find(leaf_equiv >> 1);
-									if (src_it != obj_src.end())
-										src_values.insert(src_it->second);
-								}
-							}
-						}
+						for (uint32_t in_lit : leaf_it->second)
+							collect_origin_src(in_lit >> 1, origin_lits, obj_src, src_values);
 					}
 					if (!src_values.empty()) {
-						std::string merged;
-						for (auto &s : src_values) {
-							if (!merged.empty()) merged += "|";
-							merged += s;
-						}
-						instance->set_string_attribute(ID::src, merged);
-						log_debug("  applied \\src '%s' to cell %s (out_obj=%d)\n",
-								  merged.c_str(), log_id(instance), out_obj);
+						instance->set_strpool_attribute(ID::src, src_values);
+						applied++;
+						log_debug("  applied \\src to cell %s (out_obj=%d, %zu sources)\n",
+								  log_id(instance), out_obj, src_values.size());
 					}
 				}
+				if (applied > 0)
+					log("Applied \\src attributes to %d cells via origin mapping.\n", applied);
 				break;
 			} else if (c == '\n') {
 				break;

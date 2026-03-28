@@ -46,7 +46,7 @@ struct AigerReader
     std::vector<RTLIL::Wire*> bad_properties;
     std::vector<RTLIL::Cell*> boxes;
     std::vector<int> mergeability, initial_state;
-    std::vector<int32_t> equiv_lit_ids;
+    dict<int, std::vector<int32_t>> origin_lits;  // obj_id -> list of origin literals
     dict<int, RTLIL::Cell*> lut_by_obj;
     dict<int, std::vector<int>> lut_input_objs;
 

@@ -38,6 +38,7 @@
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
 #include "kernel/newcelltypes.h"
+#include "aiger_origins.h"
 #include "aigerparse.h"
 
 YOSYS_NAMESPACE_BEGIN
@@ -519,9 +520,10 @@ void AigerReader::parse_xaiger()
 			uint32_t dataSize = parse_xaiger_literal(f);
 			uint32_t n_entries = dataSize / 4;
 			log_debug("y: dataSize=%u n_entries=%u\n", dataSize, n_entries);
-			equiv_lit_ids.resize(n_entries);
-			// Data is written as native-endian 32-bit ints by ABC
-			f.read(reinterpret_cast<char*>(equiv_lit_ids.data()), dataSize);
+			// Raw int32 payload is native-endian (written by ABC via fwrite on same host)
+			std::vector<int32_t> raw(n_entries);
+			f.read(reinterpret_cast<char*>(raw.data()), dataSize);
+			origin_lits = parse_origin_lits(raw);
 		}
 		else if (c == 'a' || c == 'i' || c == 'o' || c == 's') {
 			uint32_t dataSize = parse_xaiger_literal(f);
@@ -1016,45 +1018,24 @@ void AigerReader::post_process()
 	}
 
 	// Apply \src attributes using "y" extension origin mapping.
-	// Each LUT gets \src from its output object's origin plus the origins
+	// Each LUT gets \src from its output object's origins plus the origins
 	// of its input objects, merged with '|' (Yosys multi-source convention).
-	if (!equiv_lit_ids.empty() && !obj_src.empty()) {
+	// Supports both single-origin and multi-origin formats.
+	if (!origin_lits.empty() && !obj_src.empty()) {
 		int applied = 0;
 		for (auto &[obj_id, lut] : lut_by_obj) {
 			pool<std::string> src_values;
-			// Collect \src from the output object's origin
-			if (obj_id >= 0 && obj_id < (int) equiv_lit_ids.size()) {
-				int32_t equiv_lit = equiv_lit_ids[obj_id];
-				if (equiv_lit >= 0) {
-					auto src_it = obj_src.find(equiv_lit >> 1);
-					if (src_it != obj_src.end())
-						src_values.insert(src_it->second);
-				}
-			}
-			// Collect \src from each input object's origin
+			collect_origin_src(obj_id, origin_lits, obj_src, src_values);
 			auto leaf_it = lut_input_objs.find(obj_id);
 			if (leaf_it != lut_input_objs.end()) {
-				for (int leaf_obj : leaf_it->second) {
-					if (leaf_obj >= 0 && leaf_obj < (int) equiv_lit_ids.size()) {
-						int32_t leaf_equiv = equiv_lit_ids[leaf_obj];
-						if (leaf_equiv >= 0) {
-							auto src_it = obj_src.find(leaf_equiv >> 1);
-							if (src_it != obj_src.end())
-								src_values.insert(src_it->second);
-						}
-					}
-				}
+				for (int leaf_obj : leaf_it->second)
+					collect_origin_src(leaf_obj, origin_lits, obj_src, src_values);
 			}
 			if (!src_values.empty()) {
-				std::string merged;
-				for (auto &s : src_values) {
-					if (!merged.empty()) merged += "|";
-					merged += s;
-				}
-				lut->set_string_attribute(ID::src, merged);
+				lut->set_strpool_attribute(ID::src, src_values);
 				applied++;
-				log_debug("Applied \\src '%s' to cell %s (obj %d)\n",
-						  merged.c_str(), log_id(lut), obj_id);
+				log_debug("Applied \\src to cell %s (obj %d, %zu sources)\n",
+						  log_id(lut), obj_id, src_values.size());
 			}
 		}
 		if (applied > 0)
