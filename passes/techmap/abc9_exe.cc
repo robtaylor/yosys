@@ -198,6 +198,9 @@ void abc9_module(RTLIL::Design *design, std::string script_file, std::string exe
 	abc9_script += stringf("read_box \"%s\"; ", box_file);
 	abc9_script += stringf("&read %s/input.xaig; &ps; ", tempdir_name);
 
+	if (design->scratchpad.count("abc9.origins_max"))
+		abc9_script += "&origins -M " + design->scratchpad_get_string("abc9.origins_max") + "; ";
+
 	if (!script_file.empty()) {
 		if (script_file[0] == '+') {
 			for (size_t i = 1; i < script_file.size(); i++)
