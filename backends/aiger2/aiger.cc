@@ -78,6 +78,13 @@ struct Index {
 
 	dict<Module *, ModuleInfo> modules;
 
+	// \src-provenance tracking for the "y" identity extension / map2 src lines.
+	// current_src is the \src of the RTL cell currently being decomposed in
+	// impl_op (save/restored across recursion via an RAII guard). emit_gate
+	// records it against the new AIG object id.
+	dict<int, std::string> aig_obj_src;
+	std::string current_src;
+
 	int index_wires(ModuleInfo &info, RTLIL::Module *m)
 	{
 		int sum = 0;
@@ -258,8 +265,24 @@ struct Index {
 			return lits.front();
 	}
 
+	// RAII helper: restores current_src on scope exit (impl_op has many
+	// early returns and recurses into visit()).
+	struct SrcGuard {
+		std::string &slot;
+		std::string saved;
+		SrcGuard(std::string &slot) : slot(slot), saved(slot) {}
+		~SrcGuard() { slot = saved; }
+	};
+
 	Lit impl_op(HierCursor &cursor, Cell *cell, IdString oport, int obit)
 	{
+		SrcGuard src_guard(current_src);
+		{
+			std::string s = cell->get_string_attribute(ID::src);
+			if (!s.empty())
+				current_src = s;
+		}
+
 		if (cell->type.in(REDUCE_OPS, LOGIC_OPS, CMP_OPS) && obit != 0) {
 			return CFALSE;
 		} else if (cell->type.in(CMP_OPS)) {
@@ -714,6 +737,11 @@ struct AigerWriter : Index<AigerWriter, unsigned int, 0, 1> {
 		Lit out = lit_counter;
 		nands++;
 		lit_counter += 2;
+
+		// Record the \src of the RTL cell this AND object came from, keyed
+		// by object id (literal >> 1), for the "y"/map2 src-provenance flow.
+		if (!current_src.empty())
+			aig_obj_src[out >> 1] = current_src;
 
 		if (a < b) std::swap(a, b);
 		encode(out - a);
@@ -1258,6 +1286,15 @@ struct XAigerWriter : AigerWriter {
 		for (auto &pair : pos)
 			outlits.push_back(eval_po(pair.first, &pair.second));
 
+		// Emit map2 'src' lines now that all AIG objects (and their recorded
+		// \src) exist. Goes after the 'po' lines written above; map_file is
+		// not written again after this point.
+		// TODO(boxes): object ids here are the flat combinational AIG ids;
+		// box/hierarchy renumbering on read-back is not accounted for.
+		if (map_file.is_open())
+			for (auto &it : aig_obj_src)
+				map_file << "src " << it.first << " " << it.second << "\n";
+
 		// revisit header and the list of outputs
 		f->seekp(0);
 		ninputs = pis.size();
@@ -1308,6 +1345,24 @@ struct XAigerWriter : AigerWriter {
 		write_be32(*f, holes_aiger_size);
 #endif
 		f->seekp(0, std::ios::end);
+
+		// Write "y" extension: identity mapping so ABC can seed per-object
+		// origin tracking (each AIG object maps to itself). Mirrors the old
+		// writer backends/aiger/xaiger.cc (the section length is BE32, the
+		// payload ints are written raw/native-endian as ABC's reader expects).
+		// n_objs counts all AIG vars including const0: lit_counter/2 at this
+		// point (const0 = var 0, then PIs and ANDs).
+		// TODO(boxes): assumes the flat combinational object numbering; box /
+		// hierarchy renumbering is not handled here.
+		{
+			int n_objs = lit_counter / 2;
+			f->put('y');
+			write_be32(*f, 4 * n_objs);
+			for (int i = 0; i < n_objs; i++) {
+				uint32_t lit = 2 * i;
+				f->write(reinterpret_cast<const char *>(&lit), sizeof(lit));
+			}
+		}
 
 		if (mapping_prep) {
 			std::vector<Cell *> to_remove_cells;
