@@ -587,16 +587,20 @@ void FfData::unmap_ce() {
 	if (has_srst && ce_over_srst)
 		unmap_srst();
 
+	// Propagate the FF's \src to the generated clock-enable feedback mux so
+	// downstream tools (e.g. origin tracking through ABC) can trace it back.
+	std::string src = get_src_attribute();
+
 	if (!is_fine) {
 		if (pol_ce)
-			sig_d = module->Mux(NEW_ID, sig_q, sig_d, sig_ce);
+			sig_d = module->Mux(NEW_ID, sig_q, sig_d, sig_ce, src);
 		else
-			sig_d = module->Mux(NEW_ID, sig_d, sig_q, sig_ce);
+			sig_d = module->Mux(NEW_ID, sig_d, sig_q, sig_ce, src);
 	} else {
 		if (pol_ce)
-			sig_d = module->MuxGate(NEW_ID, sig_q, sig_d, sig_ce);
+			sig_d = module->MuxGate(NEW_ID, sig_q, sig_d, sig_ce, src);
 		else
-			sig_d = module->MuxGate(NEW_ID, sig_d, sig_q, sig_ce);
+			sig_d = module->MuxGate(NEW_ID, sig_d, sig_q, sig_ce, src);
 	}
 	has_ce = false;
 }
@@ -607,16 +611,19 @@ void FfData::unmap_srst() {
 	if (has_ce && !ce_over_srst)
 		unmap_ce();
 
+	// Propagate the FF's \src to the generated sync-reset mux (see unmap_ce).
+	std::string src = get_src_attribute();
+
 	if (!is_fine) {
 		if (pol_srst)
-			sig_d = module->Mux(NEW_ID, sig_d, val_srst, sig_srst);
+			sig_d = module->Mux(NEW_ID, sig_d, val_srst, sig_srst, src);
 		else
-			sig_d = module->Mux(NEW_ID, val_srst, sig_d, sig_srst);
+			sig_d = module->Mux(NEW_ID, val_srst, sig_d, sig_srst, src);
 	} else {
 		if (pol_srst)
-			sig_d = module->MuxGate(NEW_ID, sig_d, val_srst[0], sig_srst);
+			sig_d = module->MuxGate(NEW_ID, sig_d, val_srst[0], sig_srst, src);
 		else
-			sig_d = module->MuxGate(NEW_ID, val_srst[0], sig_d, sig_srst);
+			sig_d = module->MuxGate(NEW_ID, val_srst[0], sig_d, sig_srst, src);
 	}
 	has_srst = false;
 }

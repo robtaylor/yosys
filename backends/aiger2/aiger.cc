@@ -1001,6 +1001,25 @@ struct XAigerWriter : AigerWriter {
 		lit_counter += 2;
 	}
 
+	// Seed the map2 \src for a box output literal (a CI) using the box cell's
+	// \src. Box outputs (e.g. a retained flop's Q) have no driving AND gate and
+	// thus no origin seed; without this, combinational cells fed by a flop
+	// output lose provenance through the "y" origin chain. Only ever adds
+	// entries (never removes), so designs without boxes are unaffected.
+	// Must be called after the corresponding ensure_pi() so the literal exists.
+	void seed_box_output_src(SigBit bit, HierCursor &cursor, Cell *box)
+	{
+		if (!map_file.is_open())
+			return;
+		auto it = box->attributes.find(ID::src);
+		if (it == box->attributes.end())
+			return;
+		// ensure_pi() (the documented precondition) always assigns a literal.
+		Lit lit = pi_literal(bit, &cursor);
+		log_assert(lit != EMPTY_LIT);
+		aig_obj_src[lit >> 1] = it->second.decode_string();
+	}
+
 	void append_opaque_box_ports(Cell *box, HierCursor &cursor, bool inputs)
 	{
 		for (auto &conn : box->connections_) {
@@ -1037,6 +1056,13 @@ struct XAigerWriter : AigerWriter {
 
 					ensure_pi(bit, cursor);
 					keep_wires.insert(bit.wire);
+
+					// Seed origin \src for this opaque-box output (e.g. a
+					// retained flop's Q). It is a CI with no driving AND gate, so
+					// without a seed any combinational cell downstream of it
+					// loses provenance. Use the box cell's \src so post-flop
+					// logic traces back to the RTL that defined the register.
+					seed_box_output_src(bit, cursor, box);
 				}
 			}
 		}
@@ -1184,6 +1210,10 @@ struct XAigerWriter : AigerWriter {
 
 						ensure_pi(bit, cursor, true);
 						keep_wires.insert(bit.wire);
+
+						// Seed origin \src for this box output (see
+						// seed_box_output_src / the opaque-box path above).
+						seed_box_output_src(bit, cursor, box);
 					}
 					boxes_ci_num += port->width;
 

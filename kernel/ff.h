@@ -170,6 +170,13 @@ struct FfData : FfTypeData {
 	int width;
 	dict<IdString, Const> attributes;
 
+	// The originating FF's \src, or "" if absent. Reads `attributes` (FfData is
+	// not an AttrObject and `cell` may be null), mirroring Cell::get_src_attribute().
+	std::string get_src_attribute() const {
+		auto it = attributes.find(ID::src);
+		return it != attributes.end() ? it->second.decode_string() : "";
+	}
+
 	FfData(Module *module = nullptr, FfInitVals *initvals = nullptr, IdString name = IdString()) : module(module), initvals(initvals), cell(nullptr), name(name) {
 		width = 0;
 		pol_clk = false;
