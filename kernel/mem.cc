@@ -887,6 +887,12 @@ Cell *Mem::extract_rdff(int idx, FfInitVals *initvals) {
 	if (!port.clk_enable)
 		return nullptr;
 
+	// \src of the read port (the registered-read RTL), propagated onto the
+	// generated read register and transparency logic so provenance survives.
+	std::string src = port.get_src_attribute();
+	if (src.empty())
+		src = get_src_attribute();
+
 	Cell *c;
 
 	// There are two ways to handle rdff extraction when transparency is involved:
@@ -965,7 +971,7 @@ Cell *Mem::extract_rdff(int idx, FfInitVals *initvals) {
 						raddr = port.sub_addr(sub);
 					SigSpec addr_eq;
 					if (raddr != waddr)
-						addr_eq = module->Eq(stringf("$%s$rdtransen[%d][%d][%d]$d", memid, idx, i, sub), raddr, waddr);
+						addr_eq = module->Eq(stringf("$%s$rdtransen[%d][%d][%d]$d", memid, idx, i, sub), raddr, waddr, false, src);
 					int pos = 0;
 					int ewidth = width << min_wide_log2;
 					int wsub = wide_write ? sub : 0;
@@ -978,10 +984,10 @@ Cell *Mem::extract_rdff(int idx, FfInitVals *initvals) {
 						SigSpec other = port.transparency_mask[i] ? wport.data.extract(pos + wsub * width, epos-pos) : Const(State::Sx, epos-pos);
 						SigSpec cond;
 						if (raddr != waddr)
-							cond = module->And(stringf("$%s$rdtransgate[%d][%d][%d][%d]$d", memid, idx, i, sub, pos), wport.en[pos + wsub * width], addr_eq);
+							cond = module->And(stringf("$%s$rdtransgate[%d][%d][%d][%d]$d", memid, idx, i, sub, pos), wport.en[pos + wsub * width], addr_eq, false, src);
 						else
 							cond = wport.en[pos + wsub * width];
-						SigSpec merged = module->Mux(stringf("$%s$rdtransmux[%d][%d][%d][%d]$d", memid, idx, i, sub, pos), cur, other, cond);
+						SigSpec merged = module->Mux(stringf("$%s$rdtransmux[%d][%d][%d][%d]$d", memid, idx, i, sub, pos), cur, other, cond, src);
 						sig_d.replace(pos + rsub * width, merged);
 						pos = epos;
 					}
@@ -1020,9 +1026,11 @@ Cell *Mem::extract_rdff(int idx, FfInitVals *initvals) {
 		c = ff.emit();
 	}
 
-	if (c)
+	if (c) {
+		c->set_src_attribute(src);
 		log("Extracted %s FF from read port %d of %s.%s: %s\n", trans_use_addr ? "addr" : "data",
 			idx, log_id(module), log_id(memid), log_id(c));
+	}
 
 	port.en = State::S1;
 	port.clk = State::S0;
