@@ -1,6 +1,7 @@
 [submodule "abc"]
 	path = abc
-	url = https://github.com/YosysHQ/abc
+	url = https://github.com/robtaylor/abc
+	branch = origin-tracking-clean
 # Don't use paths as names to avoid git archive problems
 [submodule "cxxopts"]
 	path = libs/cxxopts
